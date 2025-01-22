@@ -1,0 +1,325 @@
+module bio
+
+contains
+
+attributes(global) subroutine biofouling(xfinal,d_pl,rho_pl1,N,tx,deltat,i,time)
+implicit none
+
+integer i,j,k
+integer, value :: tx, N
+double precision, dimension(2), device ::x, xdot
+double precision, device :: r0, rho0, t0, mu0, nu0, na_amb0, Gama, z0, kappa, Ca_cell, vol_alg, rho_bf, shear, temp_inf, v_tot, zfix, deltat,t,collision, growth
+double precision, device :: ext_water, light_Im, ext_algae, mu_max, alpha, Q_10, temp_min, temp_opt, temp_max, density, chla_C, mu_tot, rho_tot, mortality, r_pl1
+double precision, device :: sec_per_day, mort_alg, resp_alg, light_Iopt, nalg, z, temp, salt, chla, a1, a2, a3, a4, a5, b1, b2, b3, b4, b5, light_Iz, r_alg
+double precision, device :: viscosity, a21, b21, viscosity_dyn, t_s, t_f, sha_v, theta, hour, pi, light_I0, mu_opt, na_amb, respiration, dnalg, r_tot, r_pl, rho_pl
+double precision, device :: teta_pl, v_pl, v_bf, t_bf, viscosity_kin, d_ast, om_ast, log_d, w_sink, dz, T00, beta_alg_brownian, beta_alg_settling, beta_alg_shear
+double precision,dimension(3), device :: zc,Tsurf,Tbot,p,Sfix,b11,b12,b13,b14,b15,b16,Cab,chlazbase,s,Camax,zmax,Dzz 
+double precision, device :: d_pl(N)
+double precision, device :: time(tx)
+double precision, device :: rho_pl1(N)
+double precision, device :: xfinal(tx,N)
+
+j = blockDim%x * (blockIdx%x - 1) + threadIdx%x	! Distribute the particles among threads
+if (j <= N) then  
+
+r_pl=d_pl(j)/2.d0        	        	! dimensionless plastic radius
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!  DEFINE CHARACTERISTIC SCALES   !!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
+
+r0=r_pl                     	! characteristic scale of all quantities related to plastic size
+rho0=1000.d0                   	! characteristic scale of all densities (water and plastic)
+z0=10.d0                       	! characteristic scale of depth
+t0=1.d0*24.d0*3600.d0                	! characteristic scale of time
+mu0=1.0d-3                    	! characteristic scale of dynamic viscosity
+nu0=1.0d-6                    	! characteristic scale of kinematic viscosity
+T00=20.d0+273.d0               	! characteristic scale of kelvin temperature
+na_amb0=1.0d-7                	! characteristic scale of the inverse of ambient algae concentration
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!  DEFINE PARAMETERS   !!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+kappa = 1.38064852d-23      	! Boltzman constant
+
+!!!!!!!!!!!!!!!!!!!!!!  LIGHT PARAMETERS   !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+light_Im = 1.2d8           	! Surface light intensity at noon
+ext_water = 0.2d0             	! Extinction coefficient water
+ext_algae = 0.02d0            	! Extinction coefficient algae
+
+!!!!!!!!!!!!!!!!!!!  ALGAE GROWTH PARAMETERS   !!!!!!!!!!!!!!!!!!!!!!!
+
+mu_max = 1.85d0               	! Maximum growth rate
+alpha = 0.12d0                	! Initial slope in growth equation
+mort_alg = 0.39d0             	! Mortality rate
+resp_alg = 0.1d0              	! Respiration rate
+Q_10 = 2.0d0                   	! Temperature coefficient for respiration             
+temp_min = 0.2d0              	! Minimum temperature for algae growth
+temp_opt = 26.7d0             	! Optimal temperature for algae growth
+temp_max = 33.3d0             	! Maximum temperature for algae growth
+light_Iopt = 1.75392d13    	! Optimal light intensity for algae growth
+
+!!!!!!!!!!!!!!!!!!!!!!  ALGAE PROPERTIES   !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+Ca_cell = 2726d-9           	! mg carbon for a single cell
+vol_alg = 2.0d-16/r0**3      	! dimensionless volume individual algae
+rho_bf = 1388.d0/rho0        	! dimensionless biofilm density 
+shear = 1.7d5              	! shear used in encounter rate
+
+!!!!!!!!!!!!!!!  CONVERSION FROM DAY-1 to SEC-1   !!!!!!!!!!!!!!!!!!!!
+
+sec_per_day = 86400.d0             ! seconds per day
+light_Im=light_Im/sec_per_day      ! light intensity per second
+mu_max=mu_max/sec_per_day          ! max growth rate per second
+alpha=alpha/sec_per_day            ! initial slope in growth eq. per second
+mort_alg=mort_alg/sec_per_day      ! mortality rate per second
+resp_alg=resp_alg/sec_per_day      ! respiration rate per second
+light_Iopt=light_Iopt/sec_per_day  ! opt. lig. int. al. grw. per second
+shear=shear/sec_per_day            ! shear in encounter rate per second
+
+!!!!!!!!!!!  CONVERSION TO DIMENSIONLESS PARAMETERS   !!!!!!!!!!!!!!!!
+
+light_Im=light_Im*t0        ! light intensity dimensionalized
+mu_max=mu_max*t0            ! max growth rate dimensionalized
+alpha=alpha*t0              ! initial slope in growth eq. dimensionalized
+mort_alg=mort_alg*t0        ! mortality rate dimensionalized
+resp_alg=resp_alg*t0        ! respiration rate dimensionalized
+light_Iopt=light_Iopt*t0    ! opt. lig. int. al. grw. dimensionalized
+shear=shear*t0              ! shear in encounter rate dimensionalized
+ 
+!!!!!!!!!!!!!!  INITIALIZE DIMENSIONLESS PARAMETERS   !!!!!!!!!!!!!!!!	
+
+r_pl = r_pl/r0
+rho_pl=rho_pl1(j)/rho0          	! dimensionless plastic density
+
+t = 0.d0
+nalg=0.d0                
+z=0.d0                  
+
+do k=1,tx
+
+!!!!!!!!!!!!  CALCULATE TEMPERATURE AT THE LOCATION   !!!!!!!!!!!!!!!!
+
+z = z*z0
+
+p=[2.d0, 1.d0, 2.d0]
+zc=[-300.d0, -400.d0, -1200.d0]
+Tsurf=[25.d0, 16.d0, 8.d0]
+Tbot=[1.5d0, 1.d0, 2.d0]
+
+temp=Tsurf(i)+(Tbot(i)-Tsurf(i))*z**p(i)/(z**p(i)+zc(i)**p(i))
+
+!!!!!!!!!!!!!  CALCULATE SALINITY AT THE LOCATION   !!!!!!!!!!!!!!!!!!
+
+zfix=-1000.d0
+Sfix=[34.6d0, 34.6d0, 34.5d0]
+b11=[9.9979979767d-17, -1.2695423698d-17, -2.4306209411d-16]
+b12=[1.0536246487d-12, -6.3765898788d-14, -2.3825929024d-12]
+b13=[3.9968286066d-09, 1.2655205499d-10, -8.0374560926d-09]
+b14=[6.5411526250d-06, 1.0818886978d-06, -1.0613797323d-05]
+b15=[4.1954014008d-03, 1.5454960921d-03, -4.0153966208d-03]
+b16=[3.5172984035d1, 3.4995207081d1, 3.4908138893d1]
+
+if (z > zfix) then
+    salt=b11(i)*z**5.d0+b12(i)*z**4.d0+b13(i)*z**3.d0+b14(i)*z**2.d0+b15(i)*z+b16(i)
+else 
+    salt=Sfix(i)
+end if
+
+!!!!!!!!!!!!!  CALCULATE CHLOROPHYLL AT THE LOCATION   !!!!!!!!!!!!!!!
+
+chlazbase=[0.151d0,0.185d0,2.95d0]
+Cab=[0.533d0,0.428d0,0.188d0]
+s=[1.72d-3,1.67d-5,0.0d0];
+Camax=[1.194d0,1.015d0,0.885d0];
+zmax=[92.01d0,82.360d0,9.870d0];
+Dzz=[43.46d0,57.330d0,28.210d0];
+
+chla=Cab(i)-s(i)*-z+Camax(i)*exp(-((-z-zmax(i))/Dzz(i))**2.d0);
+chla=chla*chlazbase(i);
+z = z/z0
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!  CALCULATE DENSITY AND VISCOSITY   !!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!  FROM EQ. OF STATE (SEA WATER)   !!!!!!!!!!!!!!!!!!!
+!!!!!  ATTENTION: convert salinity from g/kg (PSU) to kg/kg    !!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
+
+salt=salt*1.0d-3
+a1=9.999d2
+a2=2.034d-2
+a3=-6.162d-3
+a4=2.261d-5
+a5=-4.657d-8
+b1=8.020d2
+b2=-2.001d0
+b3=1.677d-2
+b4=2.261d-5
+b5=-4.657d-5
+
+!!!!!!!!!!!!!!!!!!!!  DENSITY CALCULATION  !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+density=a1+a2*temp+a3*(temp**2.d0)+a4*(temp**3.d0)+a5*(temp**4.d0)+b1*salt+b2*salt*temp+b3*salt*(temp**2.d0)+b4*salt*(temp**3.d0)+b5*(salt**2.d0)*(temp**2.d0)
+
+density=density/rho0        	! dimensionless sea water density
+
+!!!!!!!!!!!!!!!!!!  VISCOSITY CALCULATION  !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+viscosity=0.156d0*(temp+64.993d0)**2.d0	
+viscosity=4.2844d-5+1.0d0/(viscosity-91.296d0)	
+
+!!!!!!!!!!!!!!  DYNAMIC VISCOSITY CALCULATION  !!!!!!!!!!!!!!!!!!!!!!!
+
+a21=1.541d0+1.998d-2*temp-9.52d-5*(temp**2.d0)
+b21=7.974d0-7.561d-2*temp+4.724d-4*(temp**2.d0)
+
+viscosity_dyn=viscosity*(1.0d0+a21*salt+b21*(salt**2.d0))/mu0  !  dimensionless
+
+!!!!!!!!!!!!!!!!!  SURFACE LIGHT INTENSITY  !!!!!!!!!!!!!!!!!!!!!!!!!!
+
+pi = acos(-1.0d0)   !  = 3.14159...
+hour = mod(int((t * t0) / 3600), 24)
+!light_I0=light_Im*sin((hour-8)*pi/8.0d0)       !8 hours day : 8h-16h
+!light_I0=light_Im*sin((hour-6)*2.0d0*pi/24.0d0) !12 hours day : 6h-18h
+light_I0=light_Im*sin((hour-4)*pi/16.0d0)      !16 hours day : 4h-20h
+
+!!!!!!!!!!!!!!!!!  LIGHT BOUNDARY CONDITIONS  !!!!!!!!!!!!!!!!!!!!!!!!
+
+if(light_I0<0.) then
+  light_I0 = 0.d0
+end if
+
+!!!!!!!!!!!!!!  LIGHT INTENSITY AT OCEAN DEPTH   !!!!!!!!!!!!!!!!!!!!!
+
+light_Iz=light_I0*exp((ext_water+ext_algae*chla)*z*z0)
+
+!!!!!!!!!!!!! GROWTH RATE UNDER OPT. TEMPERATURE   !!!!!!!!!!!!!!!!!!!
+
+mu_opt=mu_max*light_Iz/(light_Iz+t0*(mu_max/alpha)*(light_Iz/light_Iopt-1.0d0)**2.d0)
+
+!!!!!!!!!!!!!!! TEMP. INFLUENCE ON GROWTH RATE   !!!!!!!!!!!!!!!!!!!!!
+
+temp_inf=((temp-temp_max)*(temp-temp_min)**2.d0)/((temp_opt-temp_min)*((temp_opt-temp_min)*(temp-temp_opt)-(temp_opt-temp_max)*(temp_opt+temp_min-2.d0*temp)));
+
+!!!!!!!!!!!!!!!!!!!!!!  ALGAE GROWTH RATE  !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+mu_tot=mu_opt*temp_inf
+
+!!!!!!!!!!!!!! CONVERSION FACTOR: CHLR TO CARBON  !!!!!!!!!!!!!!!!!!!!
+
+chla_C=0.003d0+0.0154d0*exp(0.05d0*temp)*exp(-0.059d0*light_Iz/t0*1.0d-6*sec_per_day)*mu_tot/mu_max
+
+!!!!!!!!!!!!!!!   AMBIENT ALGAE CONCENTRATION  !!!!!!!!!!!!!!!!!!!!!!!
+
+na_amb=na_amb0*(chla/chla_C)/Ca_cell
+
+!!!!!!!!!!!!!!!!!     BOUNDARY CONDITIONS    !!!!!!!!!!!!!!!!!!!!!!!!!
+
+if (light_Im*exp((ext_water+ext_algae*chla)*z*z0)<=0.01d0*light_Im) then
+     na_amb=0.d0
+end if
+
+!!!!!!!!!!!!!!!!!    PARTICLE TOTAL RADIUS   !!!!!!!!!!!!!!!!!!!!!!!!!
+
+teta_pl=4.d0*pi*(r_pl**2.d0)
+v_pl=pi*(r_pl**3)*4.d0/3.d0
+v_bf=vol_alg*nalg*teta_pl  
+v_tot=v_bf+v_pl
+          
+t_bf=(v_tot*3.d0/(4.d0*pi))**(1.d0/3.d0)-r_pl
+
+if (t_bf<0) then
+   t_bf = 0.d0
+end if
+
+r_tot=(v_tot*3.d0/(4.d0*pi))**(1.d0/3.d0)
+r_alg=(vol_alg*3.d0/(4.d0*pi))**(1.d0/3.d0)
+      
+rho_tot=(v_pl*rho_pl+v_bf*rho_bf)/v_tot
+
+!!!!!!!!!!!!!  DIMENSIONLESS PARTICLE DIAMETER   !!!!!!!!!!!!!!!!!!!!!
+
+viscosity_kin=viscosity_dyn/density  ! dimensionless kinematic viscosity        
+
+d_ast=(rho_tot-density)*9.81d0*r0**3.d0/nu0**2.d0*(2.d0*r_tot)**3.d0
+
+d_ast=abs(d_ast/(density*viscosity_kin**2.d0))
+
+!!!!!!!!!!!!!!!!!!!    SINKING VELOCITY   !!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+if (d_ast<5.0d-2) then
+    om_ast=(d_ast**2.d0)/5832.d0    
+else
+    log_d=log10(d_ast)
+    om_ast=10.d0**(-3.76715d0+1.92944d0*log_d-0.09815d0*(log_d**2.d0)-0.00575d0*(log_d**3.d0)+0.00056d0*(log_d**4.d0))   
+end if
+
+w_sink=9.81d0*nu0*om_ast*viscosity_kin*(rho_tot-density)/density
+
+if (w_sink < 0.0) then
+w_sink =((-w_sink)**(1.0d0/3.0d0))*t0/z0
+else
+w_sink =-(w_sink**(1.0d0/3.0d0))*t0/z0
+end if
+
+!!!!!!!!!!!!!!!!!   BOUNDARY CONDITIONS   !!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+if (z*z0>=0. .AND. w_sink>0.) then                        ! plastic cannot fly
+    w_sink=0.d0
+end if
+              
+if (z*z0<=-4000. .AND. w_sink<0.) then                    ! ocean floor set at -4000m 
+   w_sink=0.d0
+end if
+          
+dz=w_sink  
+
+temp=(temp+273.16d0)/T00                          	! dimensionless kelvin temperature
+
+!!!!!!!!!!!!!!!!!  ENCOUNTER KERNEL RATE   !!!!!!!!!!!!!!!!!!!!!!!!!!
+
+beta_alg_brownian=2.d0/3.d0*(temp/viscosity_dyn)*(1.d0/r_tot+1.d0/r_alg)*(r_tot+r_alg)      	! dimensionless beta_alg_brownian
+beta_alg_settling=0.5d0*pi*r_tot**2.d0*abs(w_sink)   					! dimensionless beta_alg_settling
+beta_alg_shear=4.d0/3.d0*shear*(r_tot+r_alg)**3.d0      					! dimensionless beta_shear (Laminar)
+
+!!!!!!!!!!!  R.H.S VALUES. FOR ALGAE GROWTH EQU.   !!!!!!!!!!!!!!!!!!!
+
+collision=(beta_alg_brownian*(kappa*T00*t0)/mu0+beta_alg_settling*z0*r0**2.d0+beta_alg_shear*r0**3.d0)*na_amb/(na_amb0*teta_pl) 	! dimensionless collision term
+
+growth=mu_tot*nalg                             				! dimensionless growth term
+
+mortality=mort_alg*nalg                        				! dimensionless mortality term
+
+respiration=resp_alg*nalg*Q_10**((temp*T00-20.d0-273.16d0)*0.1d0) 		! dimensionless respiration term
+
+dnalg=collision+growth-mortality-respiration   				! dimensionless dA/dt
+
+xdot=[dnalg,dz]                                				! new value for x'=f(x)
+nalg = nalg + dnalg*deltat						! new value for x
+z = z + dz*deltat						! new value for x
+
+t = t + deltat								! Time step advancement
+
+!!!!!!!!!!!!!!!!!!!!  BOUNDARY CONDITIONS  !!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+if(nalg<0.) then                 ! nalg<0 is not physical
+    nalg=0.d0
+end if
+
+if (z>0.) then                  ! plastic can not go above the sea surface
+    z=0.d0
+end if
+
+xfinal(k,j) = z
+time(k) = t
+
+
+end do
+
+end if
+
+end subroutine biofouling
+
+end module bio

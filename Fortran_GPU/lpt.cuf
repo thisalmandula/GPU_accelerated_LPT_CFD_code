@@ -1,0 +1,117 @@
+program main_code
+
+use bio
+use cudafor
+
+implicit none
+
+integer j,k,random_index,tx
+double precision itmax,deltat,rho_pl,t0
+double precision, device :: deltat_d
+integer, device :: i_d
+double precision, dimension(365) ::sha
+double precision, dimension(3) :: densities = [840, 920, 960]
+double precision, dimension(8) :: sizes = [5d-3, 1d-3, 5d-4, 1d-4, 5d-5, 1d-5, 5d-6, 1d-6]
+double precision, allocatable, dimension(:) :: d_pl, rho_pl1, time
+double precision, allocatable, dimension(:), device :: d_pl_d, rho_pl1_d, time_d
+double precision, allocatable, dimension(:,:) :: xfinal
+double precision, allocatable, dimension(:,:), device :: xfinal_d
+double precision, dimension(2) :: f0, x, xdot
+integer, value :: i = 1			! Location
+integer, value :: N = 16*16		! Number of particles
+integer, value :: tlim = 100		! Total time in days
+integer, value :: timestep = 100	! Total timestep in seconds 
+integer, parameter :: blocksize = 256
+type(dim3) :: grid, block
+integer :: istat
+character(len=20) :: filename
+real(8) :: start_time, end_time, total_time
+real :: r1, r2
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!  DEFINE MAIN LOOP FOR ITERATION   !!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
+
+! Activate for 1D block structure
+
+!grid = dim3(ceiling(real(N, kind=8)/blocksize), 1, 1)
+!block = dim3(blocksize, 1, 1)
+
+! Activate for 2D block structure
+
+grid = dim3(ceiling(real(N**(1/2), kind=8)/blocksize**(1/2)), ceiling(real(N**(1/2), kind=8)/blocksize**(1/2)), 1)
+block = dim3(blocksize**(1/2), blocksize**(1/2), 1)
+
+allocate(d_pl(N))		! Allocate particle size array
+allocate(rho_pl1(N))		! Allocate particle density array
+allocate(d_pl_d(N))		! Allocate particle size array GPU
+allocate(rho_pl1_d(N))		! Allocate particle density array GPU
+
+call random_seed()		! Initialize random seed
+
+do j = 1, N					! Populate the particle densities array
+    	call random_number(r1)  		! Generate a random number between 0 and 1
+    	random_index = int(r1 * 3) + 1  	! Map to indices 1, 2, or 3    	
+	rho_pl1(j) = densities(random_index)	! Random array of particle sizes
+	
+	call random_number(r2)  		! Generate a random number between 0 and 1
+    	random_index = int(r2 * 8) + 1  	! Map to indices 1 to 8	
+	d_pl(j) = sizes(random_index)		! Random array of particle sizes
+end do
+
+t0=1.0d0*24.0d0*3600.0d0 		! Characteristic time scale 
+tlim=tlim*24.d0*3600.d0 		! Conversion from days to seconds
+
+tx = tlim/timestep
+deltat=timestep/t0 		! Define non-dimensional timestep
+
+allocate(time(tx))		! Allocate time array
+allocate(time_d(tx))		! Allocate time array GPU
+
+allocate(xfinal(tx,N))
+allocate(xfinal_d(tx,N))
+
+d_pl_d = d_pl			! Copy particle diameters to GPU
+rho_pl1_d = rho_pl1		! Copy particle densities to GPU
+deltat_d = deltat  		! Copy to device
+i_d = i            		! Copy to device
+call cpu_time(start_time)
+call biofouling<<<grid, block>>>(xfinal_d,d_pl_d,rho_pl1_d,N,tx,deltat_d,i_d,time_d)	! Launch CUDA kernel
+
+istat = cudaDeviceSynchronize()
+  if (istat /= 0) then
+   print *, "Error during cudaDeviceSynchronize(): ", istat
+  end if
+
+call cpu_time(end_time)
+  
+total_time = end_time - start_time
+write(*,*) 'Total simulation time:', total_time, 'seconds'
+
+xfinal = xfinal_d	! Transfer data from GPU to host
+time = time_d		! Transfer data from GPU to host
+
+call cpu_time(end_time)
+
+total_time = end_time - start_time
+write(*,*) 'Total simulation time:', total_time, 'seconds'
+
+filename='par.out'
+open(unit=110,file=filename,status='replace', action='write', iostat=k)	! Open the file for writing
+
+If (k /= 0) then
+    print *, 'Error opening file ', filename		  ! Check for errors in opening the file
+    stop
+end if
+
+write(110, *) '"time","z"' ! Write data to the file
+ do j = 1, tx
+      	write(110, *) time(j),xfinal(j,1)	!The * means that data is written in free format
+ end do
+
+ close(110)
+
+
+deallocate(xfinal, xfinal_d,d_pl_d,rho_pl1_d,d_pl,rho_pl1,time,time_d)
+
+end program main_code
